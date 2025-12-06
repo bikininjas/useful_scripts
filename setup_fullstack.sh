@@ -19,24 +19,27 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # ==========================================
 log_info "🔍 Vérification de l'environnement système..."
 
-# --- Mise à jour Système (Optionnel) ---
+# --- Mise à jour Système ---
 echo -e "${YELLOW}Voulez-vous mettre à jour les paquets système (apt update & upgrade) ? (y/n)${NC}"
 read -r update_sys
 if [[ "$update_sys" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
     log_info "Mise à jour du système (nécessite sudo)..."
     sudo apt update && sudo apt upgrade -y
-    sudo apt install -y curl unzip git
+    # On installe les outils de base
+    sudo apt install -y curl unzip git make
     log_success "Système à jour."
 fi
 
-# --- Check Python Version ---
+# --- Check Python Version (Méthode Robuste sans 'bc') ---
 if command -v python3 &>/dev/null; then
-    PY_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    # Vérifie si version >= 3.12 (Ajuster selon tes besoins)
-    if (( $(echo "$PY_VERSION < 3.12" | bc -l) )); then
-        log_warn "Attention : Python $PY_VERSION détecté. Recommandé : 3.12+"
+    # On utilise python lui-même pour vérifier s'il est >= 3.12
+    # Exit code 0 = True, 1 = False
+    if python3 -c "import sys; exit(0 if sys.version_info >= (3, 12) else 1)"; then
+        PY_VERSION=$(python3 --version)
+        log_success "$PY_VERSION détecté (Compatible)."
     else
-        log_success "Python $PY_VERSION détecté."
+        PY_VERSION=$(python3 --version)
+        log_warn "Attention : $PY_VERSION détecté. Ce projet est optimisé pour Python 3.12+."
     fi
 else
     log_error "Python3 n'est pas installé."
@@ -50,6 +53,7 @@ if ! command -v bun &>/dev/null; then
     read -r install_bun
     if [[ "$install_bun" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
         curl -fsSL https://bun.sh/install | bash
+        # Configuration immédiate du path pour ce script
         export BUN_INSTALL="$HOME/.bun"
         export PATH="$BUN_INSTALL/bin:$PATH"
         log_success "Bun installé !"
@@ -80,12 +84,18 @@ cat << 'EOF' > scripts/check.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 log_info "🔍 Quality Check..."
-cd backend || exit
-log_info "Backend: Ruff..."
-ruff check . --fix && ruff format .
-cd ../frontend || exit
-log_info "Frontend: Bun Lint & TSC..."
-bun lint && bun tsc --noEmit
+if [ -d "backend" ]; then
+    cd backend || exit
+    log_info "Backend: Ruff..."
+    ruff check . --fix && ruff format .
+    cd ..
+fi
+if [ -d "frontend" ]; then
+    cd frontend || exit
+    log_info "Frontend: Bun Lint & TSC..."
+    bun lint && bun tsc --noEmit
+    cd ..
+fi
 log_success "Quality Check OK ✅"
 EOF
 
@@ -99,9 +109,12 @@ docker compose down db
 docker compose up -d db
 log_info "Waiting for Postgres..."
 until docker compose exec db pg_isready -U postgres; do sleep 1; done
-cd backend || exit
-log_info "Alembic Migrations..."
-alembic upgrade head
+if [ -d "backend" ]; then
+    cd backend || exit
+    log_info "Alembic Migrations..."
+    alembic upgrade head
+    cd ..
+fi
 log_success "Database Ready ✅"
 EOF
 
@@ -110,39 +123,43 @@ cat << 'EOF' > scripts/test.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 TYPE=$1
-if [ "$TYPE" != "front" ]; then
+if [ "$TYPE" != "front" ] && [ -d "backend" ]; then
     log_info "🧪 Backend Tests..."
     cd backend || exit; pytest --asyncio-mode=auto; cd ..
 fi
-if [ "$TYPE" != "back" ]; then
+if [ "$TYPE" != "back" ] && [ -d "frontend" ]; then
     log_info "🧪 Frontend Tests..."
     cd frontend || exit; bun run test; cd ..
 fi
 EOF
 
-# --- bootstrap.sh (Modifié pour créer le VENV) ---
+# --- bootstrap.sh ---
 cat << 'EOF' > scripts/bootstrap.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 log_info "🚀 Bootstrap Project..."
 
 # Setup Backend
-cd backend || exit
-if [ ! -d "venv" ]; then
-    log_info "Création du virtual environment Python (venv)..."
-    python3 -m venv venv
+if [ -d "backend" ]; then
+    cd backend || exit
+    if [ ! -d "venv" ]; then
+        log_info "Création du virtual environment Python (venv)..."
+        python3 -m venv venv
+    fi
+    source venv/bin/activate
+    log_info "Installation des dépendances Python..."
+    pip install --upgrade pip
+    if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+    cd ..
 fi
-source venv/bin/activate
-log_info "Installation des dépendances Python..."
-pip install --upgrade pip
-if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-cd ..
 
 # Setup Frontend
-cd frontend || exit
-log_info "Installation des dépendances Frontend..."
-bun install
-cd ..
+if [ -d "frontend" ]; then
+    cd frontend || exit
+    log_info "Installation des dépendances Frontend..."
+    bun install
+    cd ..
+fi
 
 # Env
 if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi
