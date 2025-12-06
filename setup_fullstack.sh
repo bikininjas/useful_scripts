@@ -20,16 +20,11 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_info "🔍 Vérification de l'environnement système..."
 
 # --- Mise à jour Système ---
-# FIX: On lit depuis /dev/tty pour éviter de casser le pipe curl
 echo -e "${YELLOW}Voulez-vous mettre à jour les paquets système (apt update & upgrade) ? (y/n)${NC}"
-if [ -t 0 ]; then
-    read -r update_sys
-else
-    read -r update_sys < /dev/tty
-fi
+if [ -t 0 ]; then read -r update_sys; else read -r update_sys < /dev/tty; fi
 
 if [[ "$update_sys" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
-    log_info "Mise à jour du système (nécessite sudo)..."
+    log_info "Mise à jour du système..."
     sudo apt update && sudo apt upgrade -y
     sudo apt install -y curl unzip git make
     log_success "Système à jour."
@@ -38,18 +33,16 @@ fi
 # --- Check Python Version ---
 if command -v python3 &>/dev/null; then
     if python3 -c "import sys; exit(0 if sys.version_info >= (3, 12) else 1)"; then
-        PY_VERSION=$(python3 --version)
-        log_success "$PY_VERSION détecté (Compatible)."
+        log_success "$(python3 --version) détecté."
     else
-        PY_VERSION=$(python3 --version)
-        log_warn "Attention : $PY_VERSION détecté. Ce projet est optimisé pour Python 3.12+."
+        log_warn "Attention : $(python3 --version) détecté. Optimisé pour 3.12+."
     fi
 else
     log_error "Python3 n'est pas installé."
     exit 1
 fi
 
-# --- Check Bun (Frontend) ---
+# --- Check Bun ---
 if ! command -v bun &>/dev/null; then
     log_warn "Bun n'est pas installé."
     echo -e "${YELLOW}Voulez-vous installer Bun maintenant ? (y/n)${NC}"
@@ -66,10 +59,57 @@ else
 fi
 
 # ==========================================
-# 2. GENERATION DES SCRIPTS PROJET
+# 2. SCAFFOLDING (CREATION STRUCTURE)
 # ==========================================
-log_info "📂 Génération des scripts de dev dans ./scripts/..."
-mkdir -p scripts
+log_info "🏗️  Vérification / Création de la structure du projet..."
+
+# Création des dossiers s'ils n'existent pas
+mkdir -p scripts backend frontend database
+
+# Création fichiers de base Backend
+if [ ! -f "backend/requirements.txt" ]; then
+    echo "# FastAPI deps" > backend/requirements.txt
+    echo "fastapi" >> backend/requirements.txt
+    echo "uvicorn" >> backend/requirements.txt
+    echo "sqlalchemy" >> backend/requirements.txt
+    echo "alembic" >> backend/requirements.txt
+    echo "pydantic" >> backend/requirements.txt
+    echo "python-dotenv" >> backend/requirements.txt
+fi
+
+# Création .gitkeep pour Frontend et Database (pour qu'ils soient commités même vides)
+touch frontend/.gitkeep database/.gitkeep
+
+# Gestion des variables d'environnement (.env)
+if [ ! -f ".env.example" ]; then
+    log_info "Création du template .env.example..."
+    cat << 'EOF' > .env.example
+# --- DATABASE ---
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=app_db
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+
+# --- BACKEND ---
+SECRET_KEY=change_me_super_secret_key
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# --- FRONTEND ---
+NEXT_PUBLIC_API_URL=http://localhost:8000
+EOF
+fi
+
+if [ ! -f ".env" ]; then
+    log_info "Génération du fichier .env local..."
+    cp .env.example .env
+fi
+
+# ==========================================
+# 3. GENERATION DES SCRIPTS DE MAINTENANCE
+# ==========================================
+log_info "📂 Génération des scripts utilitaires dans ./scripts/..."
 
 # --- _utils.sh ---
 cat << 'EOF' > scripts/_utils.sh
@@ -87,18 +127,13 @@ cat << 'EOF' > scripts/check.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 log_info "🔍 Quality Check..."
-if [ -d "backend" ]; then
-    cd backend || exit
-    log_info "Backend: Ruff..."
-    ruff check . --fix && ruff format .
-    cd ..
-fi
-if [ -d "frontend" ]; then
-    cd frontend || exit
-    log_info "Frontend: Bun Lint & TSC..."
-    bun lint && bun tsc --noEmit
-    cd ..
-fi
+cd backend || exit
+log_info "Backend: Ruff..."
+ruff check . --fix && ruff format .
+cd ../frontend || exit
+log_info "Frontend: Bun Lint & TSC..."
+bun lint && bun tsc --noEmit
+cd ..
 log_success "Quality Check OK ✅"
 EOF
 
@@ -112,12 +147,10 @@ docker compose down db
 docker compose up -d db
 log_info "Waiting for Postgres..."
 until docker compose exec db pg_isready -U postgres; do sleep 1; done
-if [ -d "backend" ]; then
-    cd backend || exit
-    log_info "Alembic Migrations..."
-    alembic upgrade head
-    cd ..
-fi
+cd backend || exit
+log_info "Alembic Migrations..."
+alembic upgrade head
+cd ..
 log_success "Database Ready ✅"
 EOF
 
@@ -126,57 +159,62 @@ cat << 'EOF' > scripts/test.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 TYPE=$1
-if [ "$TYPE" != "front" ] && [ -d "backend" ]; then
+if [ "$TYPE" != "front" ]; then
     log_info "🧪 Backend Tests..."
     cd backend || exit; pytest --asyncio-mode=auto; cd ..
 fi
-if [ "$TYPE" != "back" ] && [ -d "frontend" ]; then
+if [ "$TYPE" != "back" ]; then
     log_info "🧪 Frontend Tests..."
     cd frontend || exit; bun run test; cd ..
 fi
 EOF
 
-# --- bootstrap.sh ---
+# --- bootstrap.sh (Modifié pour forcer venv) ---
 cat << 'EOF' > scripts/bootstrap.sh
 #!/bin/bash
 source ./scripts/_utils.sh
 log_info "🚀 Bootstrap Project..."
 
-# Setup Backend
-if [ -d "backend" ]; then
-    cd backend || exit
-    if [ ! -d "venv" ]; then
-        log_info "Création du virtual environment Python (venv)..."
-        python3 -m venv venv
-    fi
-    source venv/bin/activate
-    log_info "Installation des dépendances Python..."
-    pip install --upgrade pip
-    if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-    cd ..
+# 1. Backend & Venv
+cd backend || exit
+if [ ! -d "venv" ]; then
+    log_info "Création du virtual environment Python (venv)..."
+    python3 -m venv venv
+else
+    log_info "Venv existant détecté."
 fi
 
-# Setup Frontend
-if [ -d "frontend" ]; then
-    cd frontend || exit
+# Activation et Installation
+source venv/bin/activate
+log_info "Installation des dépendances Python (pip)..."
+pip install --upgrade pip
+if [ -f "requirements.txt" ]; then 
+    pip install -r requirements.txt
+else
+    log_warn "Pas de requirements.txt trouvé dans backend/"
+fi
+cd ..
+
+# 2. Frontend
+cd frontend || exit
+if [ -f "package.json" ]; then
     log_info "Installation des dépendances Frontend..."
     bun install
-    cd ..
+else
+    log_warn "Dossier frontend vide (pas de package.json). Pense à lancer 'bun create next-app' ici."
 fi
+cd ..
 
-# Env
-if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi
-
-log_success "Bootstrap terminé ! Le venv est dans backend/venv"
+log_success "Bootstrap terminé ! Venv créé dans backend/venv"
 EOF
 
 chmod +x scripts/*.sh
-log_success "Scripts générés."
+log_success "Scripts et structure générés."
 
 # ==========================================
-# 3. EXECUTION INITIALE
+# 4. EXECUTION INITIALE
 # ==========================================
-echo -e "${YELLOW}Voulez-vous lancer le bootstrap (install dependencies & venv) maintenant ? (y/n)${NC}"
+echo -e "${YELLOW}Voulez-vous lancer le bootstrap (création venv & install) maintenant ? (y/n)${NC}"
 if [ -t 0 ]; then read -r run_boot; else read -r run_boot < /dev/tty; fi
 
 if [[ "$run_boot" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
