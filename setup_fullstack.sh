@@ -20,20 +20,23 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_info "🔍 Vérification de l'environnement système..."
 
 # --- Mise à jour Système ---
+# FIX: On lit depuis /dev/tty pour éviter de casser le pipe curl
 echo -e "${YELLOW}Voulez-vous mettre à jour les paquets système (apt update & upgrade) ? (y/n)${NC}"
-read -r update_sys
+if [ -t 0 ]; then
+    read -r update_sys
+else
+    read -r update_sys < /dev/tty
+fi
+
 if [[ "$update_sys" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
     log_info "Mise à jour du système (nécessite sudo)..."
     sudo apt update && sudo apt upgrade -y
-    # On installe les outils de base
     sudo apt install -y curl unzip git make
     log_success "Système à jour."
 fi
 
-# --- Check Python Version (Méthode Robuste sans 'bc') ---
+# --- Check Python Version ---
 if command -v python3 &>/dev/null; then
-    # On utilise python lui-même pour vérifier s'il est >= 3.12
-    # Exit code 0 = True, 1 = False
     if python3 -c "import sys; exit(0 if sys.version_info >= (3, 12) else 1)"; then
         PY_VERSION=$(python3 --version)
         log_success "$PY_VERSION détecté (Compatible)."
@@ -50,10 +53,10 @@ fi
 if ! command -v bun &>/dev/null; then
     log_warn "Bun n'est pas installé."
     echo -e "${YELLOW}Voulez-vous installer Bun maintenant ? (y/n)${NC}"
-    read -r install_bun
+    if [ -t 0 ]; then read -r install_bun; else read -r install_bun < /dev/tty; fi
+    
     if [[ "$install_bun" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
         curl -fsSL https://bun.sh/install | bash
-        # Configuration immédiate du path pour ce script
         export BUN_INSTALL="$HOME/.bun"
         export PATH="$BUN_INSTALL/bin:$PATH"
         log_success "Bun installé !"
@@ -174,7 +177,8 @@ log_success "Scripts générés."
 # 3. EXECUTION INITIALE
 # ==========================================
 echo -e "${YELLOW}Voulez-vous lancer le bootstrap (install dependencies & venv) maintenant ? (y/n)${NC}"
-read -r run_boot
+if [ -t 0 ]; then read -r run_boot; else read -r run_boot < /dev/tty; fi
+
 if [[ "$run_boot" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
     ./scripts/bootstrap.sh
 fi
